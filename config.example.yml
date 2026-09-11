@@ -1,0 +1,31 @@
+# One daemon, one cap: at most this many runner containers exist at the same
+# time, across all scale sets below.
+max_runners: 6
+
+runner:
+  # The image every runner container starts from. The daemon pulls it every
+  # image_refresh and only switches to a new version when no runner is alive.
+  image: ghcr.io/actions/actions-runner:latest
+  command: [/home/runner/run.sh]
+  env: {}
+  # Extra binds for every runner. The Docker socket lets jobs use
+  # `container:`, `services:` and `docker build` on the host's daemon.
+  mounts:
+    - /var/run/docker.sock:/var/run/docker.sock
+  # Host directory for the per-runner work directories. Each runner's work
+  # directory is mounted at the same path inside it (see README).
+  work_dir: /var/lib/gha-docker-scaleset/work
+  # The externals directory inside the image; copied to the same path on the
+  # host. Leave empty if no job uses `container:`.
+  externals_dir: /home/runner/externals
+  image_refresh: 24h
+
+scale_sets:
+  # A repository, an organization or an enterprise. On a personal account
+  # a scale set belongs to one repository, so list each repository.
+  - name: my-runners
+    url: https://github.com/OWNER/REPO
+    # What `runs-on:` matches. Defaults to the name.
+    labels: [self-hosted, Linux, X64]
+    # Cap for this scale set on top of the global one.
+    max_runners: 4
