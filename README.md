@@ -103,8 +103,30 @@ Without this a container job fails with `cannot open /__w/_temp/…sh` or
 `/__e/node24/bin/node: no such file or directory`. If none of your jobs start
 containers, leave `externals_dir` empty.
 
-Anything else shared between runners and job containers, such as a tool cache,
-follows the same rule: add it to `mounts` as `path:path`.
+Anything else you mount into runners and pass on to job containers follows the
+same rule: add it to `mounts` as `path:path`.
+
+### Do not share a tool cache between runners
+
+It is tempting to mount one tool cache (`/opt/hostedtoolcache`) into every
+runner so that `setup-node` and friends do not download on every job. Don't:
+CI jobs tend to start at the same moment and install the same version into
+the same directory at once. Measured with four simultaneous jobs: all four
+failed with `ENOENT`/`ENOTEMPTY` while copying node into the cache, after which
+`setup-node` fell back to the image's system node.
+
+Give every runner its own cache inside its work directory instead, by making
+the tool directory variable empty so the runner falls back to
+`<work directory>/_tool`:
+
+```yaml
+runner:
+  env:
+    AGENT_TOOLSDIRECTORY: ""   # or RUNNER_TOOL_CACHE, whichever your image sets
+```
+
+It is on the same path as on the host (so a job container gets it as `/__t`)
+and disappears with the work directory. The price is one download per job.
 
 ## Using another runner image
 
