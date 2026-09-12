@@ -1,4 +1,7 @@
-package main
+// Package scaler keeps one scale set's runner containers in line with the
+// jobs GitHub assigned to it, within that scale set's own cap and the pool's
+// shared one.
+package scaler
 
 import (
 	"context"
@@ -15,57 +18,57 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
+	"github.com/feyst/gha-docker-scaleset/src/internal/runner"
 )
 
 const (
 	// idleGrace keeps a fresh runner around for a while before scaling it
-	// down: the statistics that ask for fewer runners can lag behind the job
+	// down: the statistics asking for fewer runners can lag behind the job
 	// that is being assigned to it.
 	idleGrace = time.Minute
-	// exitGrace gives the JobStarted and JobCompleted messages time to arrive
-	// before a stopped runner container is treated as having died.
+	// exitGrace gives the job messages time to arrive before a stopped
+	// container is treated as a runner that died.
 	exitGrace = time.Minute
 	logTail   = 20
 )
 
-// RunnerAPI is what a Scaler needs from GitHub; *scaleset.Client implements it.
-type RunnerAPI interface {
+// GitHub is what this package needs from the scale set API; *scaleset.Client
+// implements it.
+type GitHub interface {
 	GenerateJitRunnerConfig(ctx context.Context, setting *scaleset.RunnerScaleSetJitRunnerSetting, scaleSetID int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
 	RemoveRunner(ctx context.Context, runnerID int64) error
 	GetRunnerByName(ctx context.Context, name string) (*scaleset.RunnerReference, error)
 }
 
-// RunnerRuntime is what a Scaler needs from the container runtime.
-type RunnerRuntime interface {
-	StartRunner(ctx context.Context, spec RunnerSpec) (string, error)
+// Containers is what this package needs from the container runtime.
+type Containers interface {
+	StartRunner(ctx context.Context, spec runner.Spec) (string, error)
 	RemoveContainer(ctx context.Context, id string) error
-	InspectRunner(ctx context.Context, id string) (RunnerState, error)
+	InspectRunner(ctx context.Context, id string) (runner.State, error)
 	RunnerLogs(ctx context.Context, id string, lines int) string
 }
 
-// ImageSource tells which image new runners start from.
-type ImageSource interface {
+// Images tells which image new runners start from.
+type Images interface {
 	Current() string
 }
 
-// RunnerSpec is one runner container to start.
-type RunnerSpec struct {
-	Name      string
-	ScaleSet  string
-	ImageID   string
-	JITConfig string
-	WorkDir   string
+// Slots is what this package needs from the runner pool.
+type Slots interface {
+	TryAcquire() bool
+	Return()
+	Release()
 }
 
-// RunnerState is what the runtime knows about a runner container.
-type RunnerState struct {
-	Exists     bool
-	Running    bool
-	ExitCode   int
-	FinishedAt time.Time
+// Options describe the scale set this scaler serves.
+type Options struct {
+	Name       string
+	MaxRunners int
+	// WorkRoot holds one work directory per runner.
+	WorkRoot string
 }
 
-type runner struct {
+type managedRunner struct {
 	name        string
 	containerID string
 	runnerID    int64
@@ -73,18 +76,14 @@ type runner struct {
 	started     time.Time
 }
 
-// Scaler keeps one scale set's runner containers in line with the jobs GitHub
-// assigned to it, within the scale set's own cap and the broker's global one.
+// Scaler starts a runner per assigned job and removes it when the job is done.
 type Scaler struct {
-	name       string
-	maxRunners int
-	workRoot   string
-
-	gh     RunnerAPI
-	rt     RunnerRuntime
-	images ImageSource
-	broker *Broker
-	log    *slog.Logger
+	opts       Options
+	gh         GitHub
+	containers Containers
+	images     Images
+	slots      Slots
+	log        *slog.Logger
 
 	now       func() time.Time
 	removeDir func(path string) error
@@ -92,30 +91,28 @@ type Scaler struct {
 	mu         sync.Mutex
 	scaleSetID int
 	desired    int
-	runners    map[string]*runner
-}
-
-// NewScaler returns a scaler for one scale set. It starts nothing until
-// SetScaleSetID has been called.
-func NewScaler(cfg ScaleSetConfig, workRoot string, gh RunnerAPI, rt RunnerRuntime, images ImageSource, broker *Broker, log *slog.Logger) *Scaler {
-	return &Scaler{
-		name:       cfg.Name,
-		maxRunners: cfg.MaxRunners,
-		workRoot:   workRoot,
-		gh:         gh,
-		rt:         rt,
-		images:     images,
-		broker:     broker,
-		log:        log,
-		now:        time.Now,
-		removeDir:  os.RemoveAll,
-		runners:    make(map[string]*runner),
-	}
+	runners    map[string]*managedRunner
 }
 
 var _ listener.Scaler = (*Scaler)(nil)
 
-// SetScaleSetID sets the ID of the registered scale set new runners join.
+// New returns a scaler. It starts nothing until SetScaleSetID has been called
+// with the ID of the registered scale set.
+func New(opts Options, gh GitHub, containers Containers, images Images, slots Slots, log *slog.Logger) *Scaler {
+	return &Scaler{
+		opts:       opts,
+		gh:         gh,
+		containers: containers,
+		images:     images,
+		slots:      slots,
+		log:        log,
+		now:        time.Now,
+		removeDir:  os.RemoveAll,
+		runners:    make(map[string]*managedRunner),
+	}
+}
+
+// SetScaleSetID sets the ID of the scale set new runners join.
 func (s *Scaler) SetScaleSetID(id int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -123,7 +120,7 @@ func (s *Scaler) SetScaleSetID(id int) {
 }
 
 // HandleDesiredRunnerCount starts or scales down runners towards count. It
-// never returns an error: that would stop the listener, and a failure to
+// never returns an error: that would stop the listener, while a failure to
 // start a runner is retried on the next message anyway.
 func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	s.mu.Lock()
@@ -133,7 +130,7 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 	return len(s.runners), nil
 }
 
-// HandleJobStarted marks the runner as busy, so it is never scaled down.
+// HandleJobStarted marks a runner as busy, so it is never scaled down.
 func (s *Scaler) HandleJobStarted(_ context.Context, job *scaleset.JobStarted) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -175,7 +172,7 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobComple
 }
 
 // Kick retries starting runners, typically because another scale set freed a
-// slot under the global cap.
+// slot under the shared cap.
 func (s *Scaler) Kick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -187,13 +184,13 @@ func (s *Scaler) Kick(ctx context.Context) {
 
 // Adopt takes over runner containers left by a previous run of the daemon.
 // Their slots have already been counted by the caller.
-func (s *Scaler) Adopt(ctx context.Context, containers []RunnerContainer) {
+func (s *Scaler) Adopt(ctx context.Context, containers []runner.Container) {
 	for _, c := range containers {
 		if !c.Running {
 			s.cleanUpStopped(ctx, c)
 			continue
 		}
-		r := &runner{name: c.Name, containerID: c.ID, started: s.now()}
+		r := &managedRunner{name: c.Name, containerID: c.ID, started: s.now()}
 		if ref, err := s.gh.GetRunnerByName(ctx, c.Name); err == nil && ref != nil {
 			r.runnerID = int64(ref.ID)
 		}
@@ -204,29 +201,29 @@ func (s *Scaler) Adopt(ctx context.Context, containers []RunnerContainer) {
 	}
 }
 
-// Watch removes runner containers that stopped without GitHub telling us:
-// a runner that crashed before it ran a job, or a completion message that
-// never arrived.
+// Watch removes runner containers that stopped without GitHub telling us: a
+// runner that died before it ran a job, or a completion message that never
+// arrived.
 func (s *Scaler) Watch(ctx context.Context) {
 	s.mu.Lock()
-	snapshot := make([]*runner, 0, len(s.runners))
+	snapshot := make([]*managedRunner, 0, len(s.runners))
 	for _, r := range s.runners {
 		snapshot = append(snapshot, r)
 	}
 	s.mu.Unlock()
 
 	for _, r := range snapshot {
-		st, err := s.rt.InspectRunner(ctx, r.containerID)
+		state, err := s.containers.InspectRunner(ctx, r.containerID)
 		if err != nil {
 			s.log.Warn("Inspecting a runner container failed", slog.String("runner", r.name), slog.String("error", err.Error()))
 			continue
 		}
-		if st.Running || (st.Exists && s.now().Sub(st.FinishedAt) < exitGrace) {
+		if state.Running || (state.Exists && s.now().Sub(state.FinishedAt) < exitGrace) {
 			continue
 		}
 		tail := ""
-		if st.Exists {
-			tail = s.rt.RunnerLogs(ctx, r.containerID, logTail)
+		if state.Exists {
+			tail = s.containers.RunnerLogs(ctx, r.containerID, logTail)
 		}
 
 		s.mu.Lock()
@@ -236,10 +233,10 @@ func (s *Scaler) Watch(ctx context.Context) {
 		}
 		if r.busy {
 			s.log.Warn("Runner container stopped without a job completion message",
-				slog.String("runner", r.name), slog.Int("exitCode", st.ExitCode))
+				slog.String("runner", r.name), slog.Int("exitCode", state.ExitCode))
 		} else {
 			s.log.Warn("Runner container stopped before it ran a job",
-				slog.String("runner", r.name), slog.Int("exitCode", st.ExitCode), slog.String("logs", tail))
+				slog.String("runner", r.name), slog.Int("exitCode", state.ExitCode), slog.String("logs", tail))
 			if r.runnerID != 0 {
 				_ = s.gh.RemoveRunner(ctx, r.runnerID)
 			}
@@ -269,15 +266,15 @@ func (s *Scaler) reconcileLocked(ctx context.Context) {
 	if s.scaleSetID == 0 || ctx.Err() != nil {
 		return
 	}
-	target := min(s.maxRunners, s.desired)
+	target := min(s.opts.MaxRunners, s.desired)
 
 	for len(s.runners) < target {
-		if !s.broker.TryAcquire() {
+		if !s.slots.TryAcquire() {
 			s.log.Debug("No free runner slot", slog.Int("wanted", target), slog.Int("running", len(s.runners)))
 			break
 		}
 		if err := s.startLocked(ctx); err != nil {
-			s.broker.Return()
+			s.slots.Return()
 			s.log.Warn("Starting a runner failed", slog.String("error", err.Error()))
 			break
 		}
@@ -307,8 +304,8 @@ func (s *Scaler) startLocked(ctx context.Context) error {
 	if imageID == "" {
 		return errors.New("no runner image available yet")
 	}
-	name := s.name + "-" + randomSuffix()
-	workDir := filepath.Join(s.workRoot, name)
+	name := s.opts.Name + "-" + randomSuffix()
+	workDir := filepath.Join(s.opts.WorkRoot, name)
 
 	jit, err := s.gh.GenerateJitRunnerConfig(ctx, &scaleset.RunnerScaleSetJitRunnerSetting{Name: name, WorkFolder: workDir}, s.scaleSetID)
 	if err != nil {
@@ -319,7 +316,13 @@ func (s *Scaler) startLocked(ctx context.Context) error {
 		runnerID = int64(jit.Runner.ID)
 	}
 
-	id, err := s.rt.StartRunner(ctx, RunnerSpec{Name: name, ScaleSet: s.name, ImageID: imageID, JITConfig: jit.EncodedJITConfig, WorkDir: workDir})
+	id, err := s.containers.StartRunner(ctx, runner.Spec{
+		Name:      name,
+		ScaleSet:  s.opts.Name,
+		ImageID:   imageID,
+		JITConfig: jit.EncodedJITConfig,
+		WorkDir:   workDir,
+	})
 	if err != nil {
 		if runnerID != 0 {
 			_ = s.gh.RemoveRunner(ctx, runnerID)
@@ -328,28 +331,28 @@ func (s *Scaler) startLocked(ctx context.Context) error {
 		return fmt.Errorf("starting the runner container: %w", err)
 	}
 
-	s.runners[name] = &runner{name: name, containerID: id, runnerID: runnerID, started: s.now()}
+	s.runners[name] = &managedRunner{name: name, containerID: id, runnerID: runnerID, started: s.now()}
 	s.log.Info("Runner started", slog.String("runner", name))
 	return nil
 }
 
-func (s *Scaler) discardLocked(ctx context.Context, r *runner) {
-	if err := s.rt.RemoveContainer(ctx, r.containerID); err != nil {
+func (s *Scaler) discardLocked(ctx context.Context, r *managedRunner) {
+	if err := s.containers.RemoveContainer(ctx, r.containerID); err != nil {
 		s.log.Warn("Removing a runner container failed", slog.String("runner", r.name), slog.String("error", err.Error()))
 	}
-	if err := s.removeDir(filepath.Join(s.workRoot, r.name)); err != nil {
+	if err := s.removeDir(filepath.Join(s.opts.WorkRoot, r.name)); err != nil {
 		s.log.Warn("Removing a runner work directory failed", slog.String("runner", r.name), slog.String("error", err.Error()))
 	}
 	delete(s.runners, r.name)
-	s.broker.Release()
+	s.slots.Release()
 	s.log.Info("Runner removed", slog.String("runner", r.name))
 }
 
-func (s *Scaler) cleanUpStopped(ctx context.Context, c RunnerContainer) {
-	if err := s.rt.RemoveContainer(ctx, c.ID); err != nil {
+func (s *Scaler) cleanUpStopped(ctx context.Context, c runner.Container) {
+	if err := s.containers.RemoveContainer(ctx, c.ID); err != nil {
 		s.log.Warn("Removing a stopped runner container failed", slog.String("runner", c.Name), slog.String("error", err.Error()))
 	}
-	_ = s.removeDir(filepath.Join(s.workRoot, c.Name))
+	_ = s.removeDir(filepath.Join(s.opts.WorkRoot, c.Name))
 	if ref, err := s.gh.GetRunnerByName(ctx, c.Name); err == nil && ref != nil {
 		_ = s.gh.RemoveRunner(ctx, int64(ref.ID))
 	}
@@ -358,12 +361,12 @@ func (s *Scaler) cleanUpStopped(ctx context.Context, c RunnerContainer) {
 
 // sortedRunnersLocked returns the runners oldest first, so scaling down is
 // deterministic.
-func (s *Scaler) sortedRunnersLocked() []*runner {
-	list := make([]*runner, 0, len(s.runners))
+func (s *Scaler) sortedRunnersLocked() []*managedRunner {
+	list := make([]*managedRunner, 0, len(s.runners))
 	for _, r := range s.runners {
 		list = append(list, r)
 	}
-	slices.SortFunc(list, func(a, b *runner) int { return a.started.Compare(b.started) })
+	slices.SortFunc(list, func(a, b *managedRunner) int { return a.started.Compare(b.started) })
 	return list
 }
 

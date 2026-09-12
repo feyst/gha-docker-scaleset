@@ -1,11 +1,13 @@
 FROM golang:1.26 AS build
-WORKDIR /src
+WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
+COPY src ./src
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" -o /gha-docker-scaleset .
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+    -o /gha-docker-scaleset ./src/cmd/gha-docker-scaleset
 
 # Runs as root: it talks to the Docker socket and removes work directories
 # that jobs filled with root-owned files.

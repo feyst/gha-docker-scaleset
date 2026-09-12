@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"strings"
@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-func TestConfigDefaults(t *testing.T) {
-	cfg, err := ParseConfig([]byte(`
+func TestDefaults(t *testing.T) {
+	cfg, err := Parse([]byte(`
 max_runners: 4
 scale_sets:
   - name: api
@@ -25,8 +25,8 @@ scale_sets:
 	}
 }
 
-func TestConfigParsesDurationsAndLists(t *testing.T) {
-	cfg, err := ParseConfig([]byte(`
+func TestParsesDurationsAndLists(t *testing.T) {
+	cfg, err := Parse([]byte(`
 max_runners: 6
 runner:
   image: myoung34/github-runner:latest
@@ -50,7 +50,7 @@ scale_sets:
 	}
 }
 
-func TestConfigRejectsMistakes(t *testing.T) {
+func TestRejectsMistakes(t *testing.T) {
 	cases := map[string]string{
 		"unknown field":  "max_runners: 1\nmax_runner: 2\nscale_sets: [{name: a, url: https://github.com/o/r}]",
 		"no scale sets":  "max_runners: 1",
@@ -65,7 +65,7 @@ func TestConfigRejectsMistakes(t *testing.T) {
 	}
 	for name, yml := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := ParseConfig([]byte(yml)); err == nil {
+			if _, err := Parse([]byte(yml)); err == nil {
 				t.Fatalf("expected an error for %s", strings.TrimSpace(name))
 			}
 		})

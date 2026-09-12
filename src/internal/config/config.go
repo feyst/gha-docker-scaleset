@@ -1,4 +1,7 @@
-package main
+// Package config reads and validates the daemon's configuration file. It
+// knows the YAML shape and nothing else: every other package is handed the
+// few values it needs.
+package config
 
 import (
 	"bytes"
@@ -8,15 +11,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/actions/scaleset"
 	"gopkg.in/yaml.v3"
 )
-
-const defaultRunnerGroup = scaleset.DefaultRunnerGroup
 
 // Config is the file-based configuration of the daemon.
 type Config struct {
@@ -31,7 +31,7 @@ type RunnerConfig struct {
 	Image   string            `yaml:"image"`
 	Command []string          `yaml:"command"`
 	Env     map[string]string `yaml:"env"`
-	// Mounts are extra "host:container[:opts]" binds for every runner.
+	// Mounts are extra "host:container[:options]" binds for every runner.
 	Mounts []string `yaml:"mounts"`
 	// WorkDir is the host directory under which each runner gets its own work
 	// directory, mounted at the same path inside the runner. The same path is
@@ -62,17 +62,17 @@ var (
 	safePathPattern     = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 )
 
-// LoadConfig reads and validates the configuration file at path.
-func LoadConfig(path string) (*Config, error) {
+// Load reads and validates the configuration file at path.
+func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("reading config: %w", err)
 	}
-	return ParseConfig(data)
+	return Parse(data)
 }
 
-// ParseConfig parses, defaults and validates a YAML configuration.
-func ParseConfig(data []byte) (*Config, error) {
+// Parse parses, defaults and validates a YAML configuration.
+func Parse(data []byte) (*Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
@@ -106,7 +106,7 @@ func (c *Config) applyDefaults() {
 			s.MaxRunners = c.MaxRunners
 		}
 		if s.RunnerGroup == "" {
-			s.RunnerGroup = defaultRunnerGroup
+			s.RunnerGroup = scaleset.DefaultRunnerGroup
 		}
 		if len(s.Labels) == 0 {
 			s.Labels = []string{s.Name}
@@ -122,23 +122,7 @@ func (c *Config) validate() error {
 	if len(c.ScaleSets) == 0 {
 		errs = append(errs, errors.New("at least one scale set is required"))
 	}
-
-	r := c.Runner
-	if !safePathPattern.MatchString(r.WorkDir) {
-		errs = append(errs, fmt.Errorf("runner.work_dir %q must be an absolute path", r.WorkDir))
-	}
-	if r.ExternalsDir != "" && (!safePathPattern.MatchString(r.ExternalsDir) || filepath.Dir(r.ExternalsDir) == "/") {
-		errs = append(errs, fmt.Errorf("runner.externals_dir %q must be an absolute path below a directory other than /", r.ExternalsDir))
-	}
-	for _, m := range r.Mounts {
-		parts := strings.Split(m, ":")
-		if len(parts) < 2 || len(parts) > 3 || !filepath.IsAbs(parts[0]) || !filepath.IsAbs(parts[1]) {
-			errs = append(errs, fmt.Errorf("runner.mounts entry %q must be host-path:container-path[:options]", m))
-		}
-	}
-	if r.ImageRefresh < time.Minute {
-		errs = append(errs, errors.New("runner.image_refresh must be at least 1m"))
-	}
+	errs = append(errs, c.Runner.validate()...)
 
 	seen := make(map[string]bool)
 	for i, s := range c.ScaleSets {
@@ -165,41 +149,24 @@ func (c *Config) validate() error {
 	return errors.Join(errs...)
 }
 
-// Credentials authenticate against GitHub: a personal access token, or a
-// GitHub App.
-type Credentials struct {
-	Token string
-	App   scaleset.GitHubAppAuth
-}
-
-// CredentialsFromEnv reads GITHUB_TOKEN, or GITHUB_APP_CLIENT_ID,
-// GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY (or
-// GITHUB_APP_PRIVATE_KEY_FILE).
-func CredentialsFromEnv() (Credentials, error) {
-	clientID := os.Getenv("GITHUB_APP_CLIENT_ID")
-	if clientID == "" {
-		token := os.Getenv("GITHUB_TOKEN")
-		if token == "" {
-			return Credentials{}, errors.New("set GITHUB_TOKEN, or GITHUB_APP_CLIENT_ID with GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY")
+func (r RunnerConfig) validate() []error {
+	var errs []error
+	if !safePathPattern.MatchString(r.WorkDir) {
+		errs = append(errs, fmt.Errorf("runner.work_dir %q must be an absolute path", r.WorkDir))
+	}
+	// The externals directory is replaced by renaming it next to itself, so
+	// it needs a parent directory of its own.
+	if r.ExternalsDir != "" && (!safePathPattern.MatchString(r.ExternalsDir) || filepath.Dir(r.ExternalsDir) == "/") {
+		errs = append(errs, fmt.Errorf("runner.externals_dir %q must be an absolute path below a directory other than /", r.ExternalsDir))
+	}
+	for _, m := range r.Mounts {
+		parts := strings.Split(m, ":")
+		if len(parts) < 2 || len(parts) > 3 || !filepath.IsAbs(parts[0]) || !filepath.IsAbs(parts[1]) {
+			errs = append(errs, fmt.Errorf("runner.mounts entry %q must be host-path:container-path[:options]", m))
 		}
-		return Credentials{Token: token}, nil
 	}
-
-	installationID, err := strconv.ParseInt(os.Getenv("GITHUB_APP_INSTALLATION_ID"), 10, 64)
-	if err != nil {
-		return Credentials{}, errors.New("GITHUB_APP_INSTALLATION_ID must be a number")
+	if r.ImageRefresh < time.Minute {
+		errs = append(errs, errors.New("runner.image_refresh must be at least 1m"))
 	}
-	key := os.Getenv("GITHUB_APP_PRIVATE_KEY")
-	if file := os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE"); key == "" && file != "" {
-		data, err := os.ReadFile(file)
-		if err != nil {
-			return Credentials{}, fmt.Errorf("reading GITHUB_APP_PRIVATE_KEY_FILE: %w", err)
-		}
-		key = string(data)
-	}
-	app := scaleset.GitHubAppAuth{ClientID: clientID, InstallationID: installationID, PrivateKey: key}
-	if err := app.Validate(); err != nil {
-		return Credentials{}, fmt.Errorf("invalid GitHub App credentials: %w", err)
-	}
-	return Credentials{App: app}, nil
+	return errs
 }

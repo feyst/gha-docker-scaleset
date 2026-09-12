@@ -268,6 +268,24 @@ make vet
 make image    # builds gha-docker-scaleset:dev
 ```
 
+The code lives under `src/`, one package per job:
+
+| Package | What it decides |
+|---|---|
+| `cmd/gha-docker-scaleset` | flags, logging, start-up |
+| `internal/daemon` | wires everything together and keeps it running |
+| `internal/config` | reads and validates the configuration file |
+| `internal/actions` | credentials, registering a scale set, listening for jobs |
+| `internal/scaler` | how many runners this scale set needs, and removing them |
+| `internal/images` | which image runners start from, and its externals |
+| `internal/pool` | the cap shared by all scale sets |
+| `internal/docker` | the only package that knows Docker |
+| `internal/runner` | the shapes those last two share |
+
+`scaler`, `images` and `daemon` depend on interfaces they declare themselves,
+so the Docker side is replaceable and every decision is testable without a
+container.
+
 ## Limitations
 
 - The scale set API client is in public preview; its interfaces can still move.

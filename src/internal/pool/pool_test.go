@@ -1,4 +1,4 @@
-package main
+package pool
 
 import (
 	"sync/atomic"
@@ -6,70 +6,71 @@ import (
 	"time"
 )
 
-func TestBrokerCapsAcquisitions(t *testing.T) {
-	b := NewBroker(2)
-	if !b.TryAcquire() || !b.TryAcquire() {
+func TestCapsAcquisitions(t *testing.T) {
+	s := New(2)
+	if !s.TryAcquire() || !s.TryAcquire() {
 		t.Fatal("expected two slots")
 	}
-	if b.TryAcquire() {
+	if s.TryAcquire() {
 		t.Fatal("a third slot was handed out beyond capacity")
 	}
-	b.Release()
-	if !b.TryAcquire() {
+	s.Release()
+	if !s.TryAcquire() {
 		t.Fatal("a released slot was not handed out again")
 	}
 }
 
-func TestBrokerReleaseWakesListenersButReturnDoesNot(t *testing.T) {
-	b := NewBroker(1)
+func TestReleaseWakesListenersButReturnDoesNot(t *testing.T) {
+	s := New(1)
 	var woken atomic.Int32
-	b.OnRelease(func() { woken.Add(1) })
+	s.OnRelease(func() { woken.Add(1) })
 
-	b.TryAcquire()
-	b.Return()
+	s.TryAcquire()
+	s.Return()
 	time.Sleep(20 * time.Millisecond)
 	if woken.Load() != 0 {
 		t.Fatal("Return woke a listener")
 	}
 
-	b.TryAcquire()
-	b.Release()
+	s.TryAcquire()
+	s.Release()
 	waitFor(t, func() bool { return woken.Load() == 1 })
 }
 
-func TestBrokerWhenIdleOnlyRunsWithoutRunners(t *testing.T) {
-	b := NewBroker(2)
-	b.Adopt()
-	if b.WhenIdle(func() { t.Fatal("ran while a runner was alive") }) {
+func TestWhenIdleOnlyRunsWithoutRunners(t *testing.T) {
+	s := New(2)
+	s.Adopt()
+	if s.WhenIdle(func() { t.Fatal("ran while a runner was alive") }) {
 		t.Fatal("WhenIdle reported it ran")
 	}
-	b.Release()
+	s.Release()
 
-	ran := b.WhenIdle(func() {
-		if b.TryAcquire() {
+	ran := s.WhenIdle(func() {
+		if s.TryAcquire() {
 			t.Error("a slot was handed out during maintenance")
 		}
 	})
 	if !ran {
-		t.Fatal("WhenIdle did not run on an idle broker")
+		t.Fatal("WhenIdle did not run on an idle pool")
 	}
-	if !b.TryAcquire() {
+	if !s.TryAcquire() {
 		t.Fatal("slots stayed blocked after maintenance")
 	}
 }
 
-func TestBrokerDrainHoldsSlotsUntilMaintenanceRan(t *testing.T) {
-	b := NewBroker(3)
-	b.Drain()
-	if b.TryAcquire() {
+func TestDrainHoldsSlotsUntilMaintenanceRan(t *testing.T) {
+	s := New(3)
+	s.Drain()
+	if s.TryAcquire() {
 		t.Fatal("a slot was handed out while draining")
 	}
-	b.WhenIdle(func() {})
-	if !b.TryAcquire() {
+	s.WhenIdle(func() {})
+	if !s.TryAcquire() {
 		t.Fatal("draining did not end after maintenance")
 	}
 }
 
+// waitFor polls until cond holds.
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
