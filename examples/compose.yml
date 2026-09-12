@@ -1,0 +1,22 @@
+# Example deployment. Put config.yml next to this file.
+services:
+  scaleset:
+    # No image is published yet: run `make image` in a checkout and use the
+    # tag it builds.
+    image: gha-docker-scaleset:dev
+    restart: unless-stopped
+    # Enough time to deregister idle runners on shutdown.
+    stop_grace_period: 30s
+    command: [-config, /etc/gha-docker-scaleset/config.yml]
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?set a token with access to the repositories}
+      LOG_LEVEL: info
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.yml:/etc/gha-docker-scaleset/config.yml:ro
+      # Same path inside and outside: the daemon removes the work directory
+      # of every finished runner.
+      - /var/lib/gha-docker-scaleset:/var/lib/gha-docker-scaleset
+      # The parent of runner.externals_dir, again at the same path: the
+      # daemon keeps the copied externals and their image stamp here.
+      - /home/runner:/home/runner
