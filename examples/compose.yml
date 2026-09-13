@@ -1,22 +1,26 @@
-# Example deployment. Put config.yml next to this file.
+# A complete deployment: one daemon, a fresh runner container per job.
+# Put config.yml next to this file (see config.example.yml) and run:
+#
+#   GITHUB_TOKEN=ghp_… docker compose up -d
+#
 services:
   scaleset:
-    # No image is published yet: run `make image` in a checkout and use the
-    # tag it builds.
-    image: gha-docker-scaleset:dev
+    image: ghcr.io/feyst/gha-docker-scaleset:latest
     restart: unless-stopped
     # Enough time to deregister idle runners on shutdown.
     stop_grace_period: 30s
     command: [-config, /etc/gha-docker-scaleset/config.yml]
     environment:
-      GITHUB_TOKEN: ${GITHUB_TOKEN:?set a token with access to the repositories}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?set a token that may administer the repositories}
       LOG_LEVEL: info
     volumes:
+      # Runners are containers on this daemon; a job's own `container:` and
+      # `services:` land here too.
       - /var/run/docker.sock:/var/run/docker.sock
       - ./config.yml:/etc/gha-docker-scaleset/config.yml:ro
-      # Same path inside and outside: the daemon removes the work directory
-      # of every finished runner.
+      # Same path inside and outside: the daemon removes the work directory of
+      # every finished runner.
       - /var/lib/gha-docker-scaleset:/var/lib/gha-docker-scaleset
-      # The parent of runner.externals_dir, again at the same path: the
-      # daemon keeps the copied externals and their image stamp here.
+      # The parent of runner.externals_dir, again at the same path: the daemon
+      # keeps the copied externals and their image stamp here.
       - /home/runner:/home/runner

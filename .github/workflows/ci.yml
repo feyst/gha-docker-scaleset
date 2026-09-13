@@ -9,7 +9,10 @@ on:
 jobs:
   test:
     name: Vet and test
-    runs-on: ubuntu-latest
+    # A pull request may come from a fork, and a fork must never reach the
+    # self-hosted machine: its runners share that host's Docker socket. Pushes
+    # to main only run code that is already merged, so those run at home.
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","X64"]') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -17,8 +20,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - run: gofmt -l . | tee /dev/stderr | (! read)
-        name: gofmt
+      - name: gofmt
+        run: gofmt -l . | tee /dev/stderr | (! read)
 
       - run: go vet ./...
 
@@ -26,12 +29,16 @@ jobs:
 
   image:
     name: Build the image
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","X64"]') }}
     steps:
       - uses: actions/checkout@v4
 
-      # Build only: publishing happens on a tag, not on every push.
+      - uses: docker/setup-buildx-action@v3
+
+      # Every published architecture is built here, so a release cannot fail on
+      # a platform nobody tried. Building only, publishing is Release's job.
       - uses: docker/build-push-action@v6
         with:
           context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
           push: false

@@ -1,0 +1,58 @@
+name: Release
+
+# Publishing happens on a version tag, never on a push: a moving `latest` that
+# anyone can trigger is how a deployment gets a surprise.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish to ghcr.io
+    # GitHub-hosted on purpose: this job holds the token that may write
+    # packages, and it is free for a public repository.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # v1.2.3 gives 1.2.3, 1.2 and latest.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          # Every architecture the base image exists for (measured with
+          # `buildx imagetools inspect gcr.io/distroless/static-debian12`):
+          # a 64-bit PC or server, 64-bit ARM (Raspberry Pi 4/5, Apple
+          # silicon, Graviton), 32-bit ARM (Pi 2/3, older NAS boxes), and the
+          # two big-iron ones. The Dockerfile cross-compiles, so each costs a
+          # compile instead of an emulated build.
+          platforms: linux/amd64,linux/arm64,linux/arm/v7,linux/ppc64le,linux/s390x
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -69,13 +69,41 @@ scale_sets:
     max_runners: 4        # this repository's own cap, within the global one
 ```
 
-**2. Build and start it** — see [`examples/compose.yml`](examples/compose.yml).
-There is no published image yet, so build it from a checkout:
+**2. Start it** with this `compose.yml` next to that `config.yml`:
+
+```yaml
+services:
+  scaleset:
+    image: ghcr.io/feyst/gha-docker-scaleset:latest
+    restart: unless-stopped
+    stop_grace_period: 30s
+    command: [-config, /etc/gha-docker-scaleset/config.yml]
+    environment:
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?set a token that may administer the repositories}
+    volumes:
+      # Runners are containers on this daemon.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./config.yml:/etc/gha-docker-scaleset/config.yml:ro
+      # Same path inside and outside, so the daemon can clean up after a job.
+      - /var/lib/gha-docker-scaleset:/var/lib/gha-docker-scaleset
+      # The parent of runner.externals_dir, same path (see the same-path rule).
+      - /home/runner:/home/runner
+```
 
 ```sh
-make image                                   # builds gha-docker-scaleset:dev
 GITHUB_TOKEN=ghp_… docker compose up -d
 ```
+
+Use `ghcr.io/feyst/gha-docker-scaleset:latest`, or pin a version such as
+`:0.1.0`. Prefer building it yourself? `make image` gives you
+`gha-docker-scaleset:dev`.
+
+Every release is published for **`linux/amd64`, `linux/arm64`, `linux/arm/v7`,
+`linux/ppc64le` and `linux/s390x`** — a PC or server, a Raspberry Pi 4/5, Apple
+silicon or Graviton, a Pi 2/3 or an older NAS, and the two big-iron
+architectures. `docker compose` picks the right one by itself. That is every
+architecture the base image exists for; the daemon itself is pure Go and builds
+for more, so open an issue if you need one.
 
 **3. Point a workflow at it.** The labels above are what `runs-on` matches, so
 existing workflows usually need no change at all:
@@ -257,6 +285,17 @@ command in `command` is wrong for this image.
 so caches in `$HOME` are gone. Use `actions/cache` in the workflow.
 
 ---
+
+## Releases
+
+A tag `vX.Y.Z` publishes images for all five architectures to
+`ghcr.io/feyst/gha-docker-scaleset` as `X.Y.Z`, `X.Y` and `latest`. Pull
+requests and pushes to main build those same architectures without publishing,
+so a release cannot fail on a platform nobody tried.
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
 
 ## Development
 
