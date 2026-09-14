@@ -6,13 +6,14 @@ on:
     branches:
       - main
 
+# GitHub-hosted on purpose, for every event: this repository is public, and a
+# self-hosted runner that shares its host's Docker socket must never run code
+# from a fork. It costs nothing, since hosted minutes are free for public
+# repositories.
 jobs:
   test:
     name: Vet and test
-    # A pull request may come from a fork, and a fork must never reach the
-    # self-hosted machine: its runners share that host's Docker socket. Pushes
-    # to main only run code that is already merged, so those run at home.
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","X64"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +30,7 @@ jobs:
 
   image:
     name: Build the image
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && '["ubuntu-latest"]' || '["self-hosted","Linux","X64"]') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
