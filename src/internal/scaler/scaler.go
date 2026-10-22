@@ -1,6 +1,6 @@
 // Package scaler keeps one scale set's runner containers in line with the
-// jobs GitHub assigned to it, within that scale set's own cap and the pool's
-// shared one.
+// jobs GitHub assigned to it, within the pool's shared cap and, optionally, a
+// cap of its own.
 package scaler
 
 import (
@@ -53,9 +53,15 @@ type Images interface {
 	Current() string
 }
 
-// Slots is what this package needs from the runner pool.
+// Slots is what this package needs from its place in the runner pool's
+// queue; *pool.Waiter implements it.
 type Slots interface {
+	// Want sets how many more runners this scale set is waiting for.
+	Want(n int)
+	// TryAcquire takes a slot if it is this scale set's turn.
 	TryAcquire() bool
+	// Requeue moves this scale set to the back of the queue.
+	Requeue(n int)
 	Return()
 	Release()
 }
@@ -171,8 +177,8 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, job *scaleset.JobComple
 	return nil
 }
 
-// Kick retries starting runners, typically because another scale set freed a
-// slot under the shared cap.
+// Kick retries starting runners, typically because the pool has a free slot
+// for this scale set.
 func (s *Scaler) Kick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
@@ -267,14 +273,19 @@ func (s *Scaler) reconcileLocked(ctx context.Context) {
 		return
 	}
 	target := min(s.opts.MaxRunners, s.desired)
+	missing := func() int { return max(target-len(s.runners), 0) }
 
+	// Every missing runner is a place in the pool's queue; a scale set that
+	// needs none leaves it, so it never holds up the others.
+	s.slots.Want(missing())
 	for len(s.runners) < target {
 		if !s.slots.TryAcquire() {
-			s.log.Debug("No free runner slot", slog.Int("wanted", target), slog.Int("running", len(s.runners)))
+			s.log.Debug("Waiting for a runner slot", slog.Int("wanted", target), slog.Int("running", len(s.runners)))
 			break
 		}
 		if err := s.startLocked(ctx); err != nil {
 			s.slots.Return()
+			s.slots.Requeue(missing())
 			s.log.Warn("Starting a runner failed", slog.String("error", err.Error()))
 			break
 		}

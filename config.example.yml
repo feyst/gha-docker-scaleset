@@ -1,5 +1,7 @@
 # One daemon, one cap: at most this many runner containers exist at the same
-# time, across all scale sets below.
+# time, across all scale sets below. A scale set that is the only one with
+# work may use all of them; when several wait, a freed slot goes to the job
+# that has waited longest.
 max_runners: 6
 
 runner:
@@ -27,5 +29,6 @@ scale_sets:
     url: https://github.com/OWNER/REPO
     # What `runs-on:` matches. Defaults to the name.
     labels: [self-hosted, Linux, X64]
-    # Cap for this scale set on top of the global one.
-    max_runners: 4
+    # Optional cap for this scale set alone, within the global one. Without
+    # it the scale set may use every slot that is free when it is its turn.
+    # max_runners: 4

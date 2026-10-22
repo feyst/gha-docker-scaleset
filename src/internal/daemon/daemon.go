@@ -79,10 +79,12 @@ func Run(ctx context.Context, cfg *config.Config, creds actions.Credentials, bui
 			return fmt.Errorf("scale set %s: %w", set.Name, err)
 		}
 		setLog := log.With(slog.String("scaleSet", set.Name))
-		s := scaler.New(scaler.Options{Name: set.Name, MaxRunners: set.MaxRunners, WorkRoot: cfg.Runner.WorkDir},
-			client, runtime, imageManager, slots, setLog)
+		// The pool wakes this scale set only when a free slot is its turn.
+		var s *scaler.Scaler
+		waiter := slots.Join(func() { s.Kick(ctx) })
+		s = scaler.New(scaler.Options{Name: set.Name, MaxRunners: set.MaxRunners, WorkRoot: cfg.Runner.WorkDir},
+			client, runtime, imageManager, waiter, setLog)
 		s.Adopt(ctx, byScaleSet[set.Name])
-		slots.OnRelease(func() { s.Kick(ctx) })
 		scalers = append(scalers, s)
 		wg.Go(func() { actions.Listen(ctx, client, set, s, owner, build, setLog) })
 	}
