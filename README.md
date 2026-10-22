@@ -66,7 +66,6 @@ scale_sets:
   - name: my-repo
     url: https://github.com/OWNER/REPO
     labels: [self-hosted, Linux, X64]
-    max_runners: 4        # this repository's own cap, within the global one
 ```
 
 **2. Start it** with this `compose.yml` next to that `config.yml`:
@@ -118,7 +117,7 @@ That is it. Push a commit and watch:
 
 ```
 $ docker compose logs -f
-INFO Listening for jobs        scaleSet=my-repo labels="[self-hosted Linux X64]" maxRunners=4
+INFO Listening for jobs        scaleSet=my-repo labels="[self-hosted Linux X64]" maxRunners=6
 INFO Runner started            scaleSet=my-repo runner=my-repo-6e005605
 INFO Job started               runner=my-repo-6e005605 repository=OWNER/REPO job=Tests
 INFO Job completed             runner=my-repo-6e005605 job=Tests result=succeeded
@@ -131,10 +130,17 @@ INFO Runner removed            runner=my-repo-6e005605
 
 **Zero idle containers.** A runner exists only while there is a job for it.
 
-**One cap over everything.** `max_runners` limits all scale sets together, so
-three repositories cannot suddenly put twelve jobs on one machine. Each scale
-set can have its own lower cap. A slot freed by one repository goes to the next
-one waiting, within a second.
+**One cap over everything, first come first served.** `max_runners` limits all
+scale sets together, so three repositories cannot suddenly put twelve jobs on
+one machine. A repository that is the only one with work may use every slot.
+When several are waiting, a freed slot goes to the job that has waited
+longest, whichever repository it belongs to: every job a scale set is waiting
+for takes its own place in one queue, in the order the jobs arrived, and only
+the scale set first in line is woken, within a second. A scale set whose jobs
+are cancelled while waiting leaves the queue, and one whose runner fails to
+start goes to the back, so neither holds up the rest. If you do want to keep
+one repository from filling the machine, give its scale set a lower
+`max_runners` of its own.
 
 **A clean container per job,** with its own work directory that is removed
 afterwards. No leftovers from the previous job, ever.
@@ -169,7 +175,7 @@ the last lines of its output, so you see *why* instead of seeing a job hang.
 | `scale_sets[].name` | – | Scale set name, unique within its runner group. |
 | `scale_sets[].url` | – | Repository, organization or enterprise URL. |
 | `scale_sets[].labels` | the name | What `runs-on` matches. |
-| `scale_sets[].max_runners` | `max_runners` | This scale set's own cap. |
+| `scale_sets[].max_runners` | `max_runners` | Optional cap for this scale set alone, within the shared one. |
 | `scale_sets[].runner_group` | `default` | Runner group to register in. |
 
 ### Credentials
@@ -317,7 +323,7 @@ The code lives under `src/`, one package per job:
 | `internal/actions` | credentials, registering a scale set, listening for jobs |
 | `internal/scaler` | how many runners this scale set needs, and removing them |
 | `internal/images` | which image runners start from, and its externals |
-| `internal/pool` | the cap shared by all scale sets |
+| `internal/pool` | the cap shared by all scale sets, and whose turn a free slot is |
 | `internal/docker` | the only package that knows Docker |
 | `internal/runner` | the shapes those last two share |
 
